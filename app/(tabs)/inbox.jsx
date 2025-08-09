@@ -1,10 +1,9 @@
-import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-export default function explore() {
+export default function inbox() {
   return (
     <View>
-      <Text>explore</Text>
+      <Text>inbox</Text>
     </View>
   );
 }
