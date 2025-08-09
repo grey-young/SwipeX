@@ -197,6 +197,9 @@ export default function SignUp() {
         listings: [],
         savedListings: [],
         wishlists: [],
+        showMyLocationOnPost: false,
+        allowUsersToContactMeDirectly: true,
+        appAnnouncementAndUpdates: false,
       };
 
       // Create user document

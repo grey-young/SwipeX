@@ -85,7 +85,7 @@ const ListingCard = memo(({ item, isDark, colors, index }) => {
             </View>
           </View>
         </View>
-        <TouchableOpacity style={styles.refreshIcon}>
+        <TouchableOpacity onPress={handlePress} style={styles.refreshIcon}>
           <Ionicons
             name="arrow-up-outline"
             size={24}

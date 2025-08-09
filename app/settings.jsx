@@ -355,8 +355,10 @@ export default function Settings() {
   const handleLogout = async () => {
     try {
       await signOut(auth);
-      router.push("/login"); // Redirect to login page after successful logout
-    } catch (error) {}
+      router.push("/login"); // Ensure redirection even if logout fails
+    } catch (error) {
+    } finally {
+    }
   };
 
   // Handle Delete Account
