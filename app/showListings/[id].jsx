@@ -2,6 +2,7 @@ import { useColorScheme } from "@/hooks/useColorScheme";
 import { auth, db } from "@/lib/firebase";
 import { AntDesign, Ionicons } from "@expo/vector-icons";
 import { useNavigation } from "@react-navigation/native";
+import { ResizeMode, Video } from "expo-av";
 import { BlurView } from "expo-blur";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import {
@@ -15,7 +16,7 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -33,54 +34,103 @@ import {
 } from "react-native";
 import ImageViewer from "react-native-image-zoom-viewer";
 import MapView, { Marker } from "react-native-maps";
-import Animated, { FadeInDown, FadeInUp } from "react-native-reanimated";
+import Animated, {
+  FadeInDown,
+  FadeInUp,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated";
 
-// Color constants
+// === Dribbble-Inspired Design Enhancements ===
+// A more refined color palette with soft pastels and rich darks.
 const COLORS = {
   light: {
-    background: "#f0f2f5",
+    background: "#f8f9fa",
     card: "#ffffff",
-    text: "#1f2937",
-    border: "#e5e7eb",
-    tint: "#4f46e5",
-    accent: "#14b8a6",
+    text: "#212529",
+    secondaryText: "#6c757d",
+    border: "#dee2e6",
+    primary: "#5c79e6",
+    primaryLight: "#e9ecef",
+    accent: "#10b981",
     danger: "#ef4444",
     success: "#22c55e",
   },
   dark: {
-    background: "#0f172a",
-    card: "#1e293b",
-    text: "#f9fafb",
-    border: "#374151",
-    tint: "#6366f1",
-    accent: "#2dd4bf",
+    background: "#121212",
+    card: "#1e1e1e",
+    text: "#f8f9fa",
+    secondaryText: "#adb5bd",
+    border: "#343a40",
+    primary: "#7f98f5",
+    primaryLight: "#343a40",
+    accent: "#34d399",
     danger: "#f87171",
     success: "#4ade80",
   },
 };
 
-// Memoized carousel item for performance
-const CarouselItem = memo(({ item, width, styles, onImagePress }) => {
-  const [imageLoading, setImageLoading] = useState(true);
+// Memoized carousel item for performance.
+const CarouselItem = memo(({ item, width, onImagePress }) => {
+  const [loading, setLoading] = useState(true);
+  const video = useRef(null);
+  const [status, setStatus] = useState({});
+
+  const handlePress = () => {
+    if (item.type === "image") {
+      onImagePress(item.uri);
+    } else {
+      if (video.current) {
+        status.isPlaying
+          ? video.current.pauseAsync()
+          : video.current.playAsync();
+      }
+    }
+  };
 
   return (
     <TouchableOpacity
       style={[styles.carouselItem, { width }]}
       activeOpacity={0.9}
-      onPress={() => onImagePress(item)}
+      onPress={handlePress}
     >
-      {imageLoading && (
-        <View style={styles.imageLoadingOverlay}>
+      {loading && (
+        <View style={styles.mediaLoadingOverlay}>
           <ActivityIndicator size="small" color="#fff" />
         </View>
       )}
-      <Image
-        source={{ uri: item }}
-        style={styles.carouselImage}
-        resizeMode="cover"
-        onLoadStart={() => setImageLoading(true)}
-        onLoadEnd={() => setImageLoading(false)}
-      />
+      {item.type === "image" ? (
+        <Image
+          source={{ uri: item.uri }}
+          style={styles.carouselMedia}
+          resizeMode="cover"
+          onLoadStart={() => setLoading(true)}
+          onLoadEnd={() => setLoading(false)}
+        />
+      ) : (
+        <Video
+          ref={video}
+          style={styles.carouselMedia}
+          source={{ uri: item.uri }}
+          useNativeControls={false}
+          resizeMode={ResizeMode.COVER}
+          isLooping
+          onPlaybackStatusUpdate={(status) => {
+            setStatus(status);
+            if (status.isLoaded && loading) setLoading(false);
+          }}
+        />
+      )}
+      {item.type === "video" && !loading && (
+        <View style={styles.videoOverlay}>
+          <Ionicons
+            name={status.isPlaying ? "pause" : "play"}
+            size={36}
+            color="#fff"
+          />
+        </View>
+      )}
     </TouchableOpacity>
   );
 });
@@ -99,6 +149,9 @@ export default function ListingDetailScreen() {
   const [activeSlide, setActiveSlide] = useState(0);
   const [isModalVisible, setIsModalVisible] = useState(false);
   const router = useRouter();
+
+  // Reanimated shared values for animations
+  const likeScale = useSharedValue(1);
 
   const { id: listingId } = useLocalSearchParams();
 
@@ -132,6 +185,7 @@ export default function ListingDetailScreen() {
         setSaved(listingData.savedBy?.includes(currentUser.uid) || false);
       }
 
+      // Increment the view count
       await updateDoc(listingDoc.ref, {
         views: (listingData.views || 0) + 1,
       });
@@ -147,9 +201,15 @@ export default function ListingDetailScreen() {
     fetchData();
   }, [fetchData]);
 
+  // Handler for liking/unliking a listing with a spring animation
   const handleLike = useCallback(async () => {
     if (!auth.currentUser || !listingId) return;
     try {
+      // Animate the button on press
+      likeScale.value = withSpring(1.2, {}, () => {
+        likeScale.value = withSpring(1);
+      });
+
       const listingsRef = collection(db, "listings");
       const q = query(listingsRef, where("postId", "==", listingId));
       const querySnapshot = await getDocs(q);
@@ -168,6 +228,14 @@ export default function ListingDetailScreen() {
     }
   }, [liked, listingId]);
 
+  // Define the animated style for the like button
+  const animatedLikeStyle = useAnimatedStyle(() => {
+    return {
+      transform: [{ scale: likeScale.value }],
+    };
+  });
+
+  // Handler for saving/unsaving a listing
   const handleSave = useCallback(async () => {
     if (!auth.currentUser || !listingId) return;
     try {
@@ -189,6 +257,7 @@ export default function ListingDetailScreen() {
     }
   }, [saved, listingId]);
 
+  // Share functionality
   const handleShare = async () => {
     if (!listing) return;
     try {
@@ -202,6 +271,7 @@ export default function ListingDetailScreen() {
     }
   };
 
+  // Navigate to the chat screen with the owner
   const handleMessage = useCallback(() => {
     if (!listing?.ownerId) return;
     router.push({
@@ -214,6 +284,7 @@ export default function ListingDetailScreen() {
     });
   }, [listing, owner]);
 
+  // Handlers for the image viewer modal
   const openImageModal = useCallback(() => {
     setIsModalVisible(true);
   }, []);
@@ -222,18 +293,15 @@ export default function ListingDetailScreen() {
     setIsModalVisible(false);
   }, []);
 
+  // Renders both image and video items in the carousel
   const renderCarouselItem = useCallback(
     ({ item }) => (
-      <CarouselItem
-        item={item}
-        width={width}
-        styles={styles}
-        onImagePress={openImageModal}
-      />
+      <CarouselItem item={item} width={width} onImagePress={openImageModal} />
     ),
-    [width, openImageModal, styles]
+    [width, openImageModal]
   );
 
+  // Renders the condition tag with dynamic colors
   const renderConditionTag = () => {
     if (!listing?.condition) return null;
     const conditionColors = {
@@ -258,6 +326,19 @@ export default function ListingDetailScreen() {
     );
   };
 
+  // Renders the price or trade information
+  const renderPrice = () => {
+    if (!listing) return "Trade Only";
+    if (listing.isOpenToAnyOffer) {
+      return "Open to Offers";
+    }
+    if (listing.isOpenToCashOffer && listing.price) {
+      return `$${listing.price.toFixed(2)}`;
+    }
+    return "Trade Only";
+  };
+
+  // Loading state UI
   if (loading) {
     return (
       <View
@@ -266,11 +347,12 @@ export default function ListingDetailScreen() {
           { backgroundColor: colors.background },
         ]}
       >
-        <ActivityIndicator size="large" color={colors.tint} />
+        <ActivityIndicator size="large" color={colors.primary} />
       </View>
     );
   }
 
+  // Error state UI
   if (!listing) {
     return (
       <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -281,51 +363,66 @@ export default function ListingDetailScreen() {
     );
   }
 
+  // Combines images and videos into a single list for the carousel
+  const combinedMedia = [
+    ...(listing?.images || []).map((uri) => ({ uri, type: "image" })),
+    ...(listing?.videos || []).map((uri) => ({ uri, type: "video" })),
+  ];
   const imageUrls = listing.images?.map((uri) => ({ url: uri })) || [];
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <Stack.Screen options={{ headerShown: false, title: listing.title }} />
 
-      <BlurView
-        intensity={80}
-        tint={isDark ? "dark" : "light"}
-        style={[styles.header, { borderBottomColor: colors.border }]}
-      >
+      {/* Floating Header Actions */}
+      <View style={styles.headerContainer}>
         <TouchableOpacity
           onPress={() => router.back()}
-          style={styles.iconButton}
+          style={[styles.headerButton, { backgroundColor: colors.card + "50" }]}
         >
           <Ionicons name="chevron-back" size={24} color={colors.text} />
         </TouchableOpacity>
         <View style={styles.headerActions}>
-          <TouchableOpacity onPress={handleShare} style={styles.iconButton}>
+          <TouchableOpacity
+            onPress={handleShare}
+            style={[
+              styles.headerButton,
+              { backgroundColor: colors.card + "50" },
+            ]}
+          >
             <Ionicons
               name="share-social-outline"
               size={20}
               color={colors.text}
             />
           </TouchableOpacity>
-          <TouchableOpacity onPress={handleSave} style={styles.iconButton}>
+          <TouchableOpacity
+            onPress={handleSave}
+            style={[
+              styles.headerButton,
+              { backgroundColor: colors.card + "50" },
+            ]}
+          >
             <Ionicons
               name={saved ? "bookmark" : "bookmark-outline"}
               size={20}
-              color={saved ? colors.tint : colors.text}
+              color={saved ? colors.primary : colors.text}
             />
           </TouchableOpacity>
         </View>
-      </BlurView>
+      </View>
 
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
       >
-        <Animated.View entering={FadeInUp.duration(500)}>
+        {/* Carousel Section */}
+        <Animated.View entering={FadeInUp.duration(600).springify()}>
           <View style={styles.carouselContainer}>
             <FlatList
-              data={listing.images || []}
+              data={combinedMedia}
               renderItem={renderCarouselItem}
-              keyExtractor={(_, idx) => idx.toString()}
+              keyExtractor={(item, idx) => `${item.uri}-${idx}`}
               horizontal
               pagingEnabled
               showsHorizontalScrollIndicator={false}
@@ -338,24 +435,26 @@ export default function ListingDetailScreen() {
                 <View style={[styles.carouselItem, { width }]}>
                   <Image
                     source={{
-                      uri: "https://via.placeholder.com/400x300.png?text=No+Images+Available",
+                      uri: "https://via.placeholder.com/400x300.png?text=No+Media+Available",
                     }}
-                    style={styles.carouselImage}
+                    style={styles.carouselMedia}
                     resizeMode="cover"
                   />
                 </View>
               )}
             />
-            {listing.images && listing.images.length > 1 && (
+            {combinedMedia.length > 1 && (
               <View style={styles.pagination}>
-                {listing.images?.map((_, index) => (
+                {combinedMedia?.map((_, index) => (
                   <View
                     key={index}
                     style={[
                       styles.paginationDot,
                       {
                         backgroundColor:
-                          index === activeSlide ? colors.card : colors.border,
+                          index === activeSlide
+                            ? colors.text
+                            : colors.text + "50",
                       },
                     ]}
                   />
@@ -365,42 +464,46 @@ export default function ListingDetailScreen() {
           </View>
         </Animated.View>
 
+        {/* Content Section */}
         <View style={styles.content}>
+          {/* Listing Details Card */}
           <Animated.View
-            entering={FadeInDown.duration(500)}
-            style={[styles.card, { backgroundColor: colors.card }]}
+            entering={FadeInDown.duration(600).springify()}
+            style={[
+              styles.listingDetailsCard,
+              { backgroundColor: colors.card },
+            ]}
           >
             <View style={styles.titleRow}>
               <Text style={[styles.title, { color: colors.text }]}>
                 {listing.title}
               </Text>
               <Text style={[styles.price, { color: colors.text }]}>
-                Trade Only
+                {renderPrice()}
               </Text>
             </View>
             <View style={styles.metaRow}>
               <View
-                style={[styles.tag, { backgroundColor: colors.tint + "20" }]}
+                style={[styles.tag, { backgroundColor: colors.primaryLight }]}
               >
-                <Text style={[styles.categoryText, { color: colors.tint }]}>
+                <Text style={[styles.categoryText, { color: colors.primary }]}>
                   {listing.itemCategory}
                 </Text>
               </View>
               {renderConditionTag()}
             </View>
-            <Text style={[styles.description, { color: colors.text }]}>
+            <Text style={[styles.description, { color: colors.secondaryText }]}>
               {listing.description}
             </Text>
           </Animated.View>
 
+          {/* Owner Info Card */}
           <Animated.View
-            entering={FadeInDown.delay(100).duration(500)}
+            entering={FadeInDown.delay(100).duration(600).springify()}
             style={[
-              styles.card,
+              styles.ownerCard,
               {
                 backgroundColor: colors.card,
-                flexDirection: "row",
-                alignItems: "center",
               },
             ]}
           >
@@ -425,22 +528,27 @@ export default function ListingDetailScreen() {
                 <Text style={[styles.ownerName, { color: colors.text }]}>
                   {listing.ownerUsername}
                 </Text>
-                <Text style={[styles.ownerMeta, { color: colors.border }]}>
+                <Text
+                  style={[styles.ownerMeta, { color: colors.secondaryText }]}
+                >
                   Active today • {listing.views} views
                 </Text>
               </View>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.messageButton, { backgroundColor: colors.tint }]}
+              style={[
+                styles.messageButton,
+                { backgroundColor: colors.primary },
+              ]}
               onPress={handleMessage}
             >
               <Ionicons name="chatbubble-ellipses" size={20} color="#fff" />
-              <Text style={styles.messageButtonText}>Message</Text>
             </TouchableOpacity>
           </Animated.View>
 
+          {/* Looking For Card */}
           <Animated.View
-            entering={FadeInDown.delay(200).duration(500)}
+            entering={FadeInDown.delay(200).duration(600).springify()}
             style={[styles.card, { backgroundColor: colors.card }]}
           >
             <Text style={[styles.sectionTitle, { color: colors.text }]}>
@@ -460,10 +568,12 @@ export default function ListingDetailScreen() {
                     key={index}
                     style={[
                       styles.exchangeTag,
-                      { backgroundColor: colors.tint + "20" },
+                      { backgroundColor: colors.primaryLight },
                     ]}
                   >
-                    <Text style={[styles.exchangeText, { color: colors.tint }]}>
+                    <Text
+                      style={[styles.exchangeText, { color: colors.primary }]}
+                    >
                       {item}
                     </Text>
                   </View>
@@ -472,9 +582,10 @@ export default function ListingDetailScreen() {
             )}
           </Animated.View>
 
+          {/* Tags Card */}
           {listing.tags?.length > 0 && (
             <Animated.View
-              entering={FadeInDown.delay(300).duration(500)}
+              entering={FadeInDown.delay(300).duration(600).springify()}
               style={[styles.card, { backgroundColor: colors.card }]}
             >
               <Text style={[styles.sectionTitle, { color: colors.text }]}>
@@ -486,10 +597,10 @@ export default function ListingDetailScreen() {
                     key={index}
                     style={[
                       styles.tag,
-                      { backgroundColor: colors.border + "30" },
+                      { backgroundColor: colors.primaryLight },
                     ]}
                   >
-                    <Text style={[styles.tagText, { color: colors.text }]}>
+                    <Text style={[styles.tagText, { color: colors.primary }]}>
                       #{tag}
                     </Text>
                   </View>
@@ -498,16 +609,23 @@ export default function ListingDetailScreen() {
             </Animated.View>
           )}
 
+          {/* Location Card */}
           <Animated.View
-            entering={FadeInDown.delay(400).duration(500)}
+            entering={FadeInDown.delay(400).duration(600).springify()}
             style={[styles.card, { backgroundColor: colors.card }]}
           >
             <Text style={[styles.sectionTitle, { color: colors.text }]}>
               Location
             </Text>
             <View style={styles.locationRow}>
-              <Ionicons name="location-sharp" size={18} color={colors.tint} />
-              <Text style={[styles.locationText, { color: colors.text }]}>
+              <Ionicons
+                name="location-sharp"
+                size={18}
+                color={colors.primary}
+              />
+              <Text
+                style={[styles.locationText, { color: colors.secondaryText }]}
+              >
                 {listing.location?.city || "Auto-detect"}
               </Text>
             </View>
@@ -528,23 +646,30 @@ export default function ListingDetailScreen() {
                   longitude: listing.location?.coordinates?.lng || -0.205,
                 }}
               >
-                <View style={[styles.marker, { backgroundColor: colors.tint }]}>
+                <View
+                  style={[styles.marker, { backgroundColor: colors.primary }]}
+                >
                   <Ionicons name="pricetag" size={16} color="#fff" />
                 </View>
               </Marker>
             </MapView>
           </Animated.View>
 
+          {/* Details Card */}
           <Animated.View
-            entering={FadeInDown.delay(500).duration(500)}
+            entering={FadeInDown.delay(500).duration(600).springify()}
             style={[
               styles.card,
               styles.detailsSection,
               { backgroundColor: colors.card },
             ]}
           >
-            <View style={styles.detailRow}>
-              <Text style={[styles.detailLabel, { color: colors.border }]}>
+            <View
+              style={[styles.detailRow, { borderBottomColor: colors.border }]}
+            >
+              <Text
+                style={[styles.detailLabel, { color: colors.secondaryText }]}
+              >
                 Posted
               </Text>
               <Text style={[styles.detailValue, { color: colors.text }]}>
@@ -552,8 +677,12 @@ export default function ListingDetailScreen() {
                   "Recently"}
               </Text>
             </View>
-            <View style={styles.detailRow}>
-              <Text style={[styles.detailLabel, { color: colors.border }]}>
+            <View
+              style={[styles.detailRow, { borderBottomColor: colors.border }]}
+            >
+              <Text
+                style={[styles.detailLabel, { color: colors.secondaryText }]}
+              >
                 Status
               </Text>
               <View
@@ -583,9 +712,30 @@ export default function ListingDetailScreen() {
               </View>
             </View>
           </Animated.View>
+
+          {/* Comments Section */}
+          <Animated.View
+            entering={FadeInDown.delay(600).duration(600).springify()}
+            style={[styles.card, { backgroundColor: colors.card }]}
+          >
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>
+              Comments
+            </Text>
+            {listing.comments && listing.comments.length > 0 ? (
+              // This is where you would map through and render comments
+              <Text style={{ color: colors.text }}>
+                Comments will be displayed here.
+              </Text>
+            ) : (
+              <Text style={{ color: colors.secondaryText }}>
+                No comments yet. Be the first to comment!
+              </Text>
+            )}
+          </Animated.View>
         </View>
       </ScrollView>
 
+      {/* Image Viewer Modal */}
       <Modal visible={isModalVisible} transparent={true}>
         <StatusBar hidden />
         <ImageViewer
@@ -615,34 +765,37 @@ export default function ListingDetailScreen() {
         />
       </Modal>
 
+      {/* Bottom Action Bar */}
       <BlurView
-        intensity={60}
+        intensity={80}
         tint={isDark ? "dark" : "light"}
         style={[styles.actionBar, { borderTopColor: colors.border }]}
       >
-        <TouchableOpacity
-          onPress={handleLike}
-          style={[
-            styles.likeButton,
-            { backgroundColor: isDark ? "#374151" : "#f3f4f6" },
-          ]}
-        >
-          <AntDesign
-            name={liked ? "heart" : "hearto"}
-            size={24}
-            color={liked ? colors.danger : colors.text}
-          />
-          <Text
+        <Animated.View style={animatedLikeStyle}>
+          <TouchableOpacity
+            onPress={handleLike}
             style={[
-              styles.likeCount,
-              { color: liked ? colors.danger : colors.text },
+              styles.likeButton,
+              { backgroundColor: isDark ? "#343a40" : "#e9ecef" },
             ]}
           >
-            {listing.likes?.length || 0}
-          </Text>
-        </TouchableOpacity>
+            <AntDesign
+              name={liked ? "heart" : "hearto"}
+              size={24}
+              color={liked ? colors.danger : colors.text}
+            />
+            <Text
+              style={[
+                styles.likeCount,
+                { color: liked ? colors.danger : colors.text },
+              ]}
+            >
+              {listing.likes?.length || 0}
+            </Text>
+          </TouchableOpacity>
+        </Animated.View>
         <TouchableOpacity
-          style={[styles.offerButton, { backgroundColor: colors.tint }]}
+          style={[styles.offerButton, { backgroundColor: colors.primary }]}
           onPress={handleMessage}
         >
           <Text style={styles.offerButtonText}>Make an Offer</Text>
@@ -667,48 +820,49 @@ const styles = StyleSheet.create({
     marginTop: 20,
     fontWeight: "600",
   },
-  header: {
+  headerContainer: {
+    position: "absolute",
+    top: Platform.OS === "ios" ? 50 : 20,
+    left: 20,
+    right: 20,
+    zIndex: 10,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 16,
-    paddingTop: Platform.OS === "ios" ? 50 : 16,
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerActions: {
     flexDirection: "row",
-    gap: 16,
+    gap: 12,
   },
-  iconButton: {
-    padding: 8,
+  headerButton: {
+    padding: 10,
     borderRadius: 99,
-    backgroundColor: "rgba(255,255,255,0.3)",
   },
   scrollContent: {
     paddingBottom: 120,
   },
   carouselContainer: {
-    height: 350,
-    marginBottom: -24,
+    height: 400, // Increased height for more visual impact
   },
   carouselItem: {
     height: "100%",
   },
-  carouselImage: {
+  carouselMedia: {
     width: "100%",
     height: "100%",
   },
-  imageLoadingOverlay: {
+  mediaLoadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: "rgba(0,0,0,0.2)",
     zIndex: 1,
+  },
+  videoOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.2)",
   },
   pagination: {
     flexDirection: "row",
@@ -718,35 +872,49 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     padding: 8,
-    backgroundColor: "rgba(0,0,0,0.3)",
-    borderRadius: 16,
-    marginHorizontal: 16,
   },
   paginationDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     marginHorizontal: 4,
   },
   content: {
     borderTopLeftRadius: 30,
     borderTopRightRadius: 30,
     marginTop: -30,
-    padding: 16,
+    paddingHorizontal: 24,
+    backgroundColor: "transparent",
   },
   card: {
     padding: 24,
-    borderRadius: 20,
+    borderRadius: 24,
     marginBottom: 16,
     ...Platform.select({
       ios: {
         shadowColor: "#000",
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.08,
+        shadowRadius: 16,
       },
       android: {
-        elevation: 5,
+        elevation: 8,
+      },
+    }),
+  },
+  listingDetailsCard: {
+    padding: 24,
+    borderRadius: 24,
+    marginBottom: 16,
+    ...Platform.select({
+      ios: {
+        shadowColor: "#000",
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.08,
+        shadowRadius: 16,
+      },
+      android: {
+        elevation: 8,
       },
     }),
   },
@@ -763,7 +931,7 @@ const styles = StyleSheet.create({
     paddingRight: 10,
   },
   price: {
-    fontSize: 20,
+    fontSize: 24,
     fontWeight: "800",
   },
   metaRow: {
@@ -795,6 +963,25 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     marginBottom: 0,
   },
+  ownerCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 20,
+    borderRadius: 24,
+    marginBottom: 16,
+    ...Platform.select({
+      ios: {
+        shadowColor: "#000",
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.08,
+        shadowRadius: 16,
+      },
+      android: {
+        elevation: 8,
+      },
+    }),
+  },
   ownerRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -805,12 +992,14 @@ const styles = StyleSheet.create({
     height: 50,
     borderRadius: 25,
     marginRight: 12,
+    borderWidth: 2,
+    borderColor: "white",
   },
   ownerInfo: {
     flex: 1,
   },
   ownerName: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: "700",
   },
   ownerMeta: {
@@ -818,20 +1007,11 @@ const styles = StyleSheet.create({
     fontWeight: "400",
   },
   messageButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-  },
-  messageButtonText: {
-    color: "#fff",
-    fontWeight: "600",
-    fontSize: 15,
+    padding: 12,
+    borderRadius: 14,
   },
   sectionTitle: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: "800",
     marginBottom: 12,
   },
@@ -901,16 +1081,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingVertical: 12,
+    paddingVertical: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "rgba(0,0,0,0.1)",
   },
   detailLabel: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "500",
   },
   detailValue: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "600",
   },
   statusTag: {

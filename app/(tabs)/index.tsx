@@ -1,5 +1,7 @@
-import { auth, db } from "@/lib/firebase"; // Assuming these are correctly configured
+import { auth, db } from "@/lib/firebase";
 import { Ionicons } from "@expo/vector-icons";
+import { AVPlaybackStatus, Video } from "expo-av";
+import * as Haptics from "expo-haptics";
 import {
   arrayRemove,
   arrayUnion,
@@ -29,29 +31,68 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  Vibration,
   View,
+  useColorScheme,
 } from "react-native";
 import {
+  Gesture,
+  GestureDetector,
   GestureHandlerRootView,
   PanGestureHandler,
 } from "react-native-gesture-handler";
-import Animated, { FadeIn, Layout } from "react-native-reanimated";
+import Animated, {
+  FadeIn,
+  Layout,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated";
 
 const { height, width } = Dimensions.get("window");
 
-// Mocking useColorScheme for standalone runnable code
-const mockUseColorScheme = () => ({
-  isDark: false,
-});
-const useColorScheme =
-  typeof useColorScheme !== "undefined" ? useColorScheme : mockUseColorScheme;
+// Types
+type VideoRefs = {
+  [key: string]: Video | null;
+};
 
-// A simple in-memory cache for user data to avoid redundant Firestore reads.
-const userProfileCache = new Map();
+type MediaItem = {
+  url: string;
+  type: "image" | "video";
+};
 
-// Helper function to fetch user data and use the cache
-const fetchUser = async (userId) => {
+type Comment = {
+  commentId: string;
+  text: string;
+  userId: string;
+  timestamp: string;
+  likes: string[];
+  replies: Comment[];
+  userUsername?: string;
+};
+
+type ListingItem = {
+  id: string;
+  postId: string;
+  title?: string;
+  description?: string;
+  ownerUsername: string;
+  ownerProfilePicture?: string;
+  itemCategory?: string;
+  location?: { city?: string };
+  videos?: string[];
+  images?: string[];
+  likes?: string[];
+  savedBy?: string[];
+  comments?: Comment[];
+  datePosted?: any;
+};
+
+// Cache
+const userProfileCache = new Map<string, any>();
+
+// Helper functions
+const fetchUser = async (userId: string) => {
   if (userProfileCache.has(userId)) {
     return userProfileCache.get(userId);
   }
@@ -61,430 +102,525 @@ const fetchUser = async (userId) => {
 
   if (userDoc.exists()) {
     const userData = userDoc.data();
-    userProfileCache.set(userId, userData); // Cache the fetched data
+    userProfileCache.set(userId, userData);
     return userData;
   }
 
   return null;
 };
 
-// A component to manage and display a single comment and its replies
-const CommentItem = ({ comment, colors, currentUser, onReply, onLike }) => {
-  const [hasLiked, setHasLiked] = useState(
-    comment.likes?.includes(currentUser?.uid)
-  );
-  const [likeCount, setLikeCount] = useState(comment.likes?.length || 0);
-  const [commenterData, setCommenterData] = useState(null);
+// Components
+const CommentItem = memo(
+  ({
+    comment,
+    colors,
+    currentUser,
+    onReply,
+    onLike,
+  }: {
+    comment: Comment;
+    colors: any;
+    currentUser: any;
+    onReply: (comment: Comment) => void;
+    onLike: (commentId: string, hasLiked: boolean) => void;
+  }) => {
+    const [hasLiked, setHasLiked] = useState(
+      comment.likes?.includes(currentUser?.uid)
+    );
+    const [likeCount, setLikeCount] = useState(comment.likes?.length || 0);
+    const [commenterData, setCommenterData] = useState<any>(null);
 
-  // Fetch the commenter's profile data when the component mounts
-  useEffect(() => {
-    const loadUserData = async () => {
-      const user = await fetchUser(comment.userId);
-      if (user) {
-        setCommenterData(user);
-      }
+    useEffect(() => {
+      const loadUserData = async () => {
+        const user = await fetchUser(comment.userId);
+        if (user) setCommenterData(user);
+      };
+      loadUserData();
+    }, [comment.userId]);
+
+    const handleLike = () => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setHasLiked((prev) => !prev);
+      setLikeCount((prev) => (hasLiked ? prev - 1 : prev + 1));
+      onLike(comment.commentId, hasLiked);
     };
-    loadUserData();
-  }, [comment.userId]);
 
-  const handleLike = () => {
-    Vibration.vibrate(50);
-    setHasLiked((prev) => !prev);
-    setLikeCount((prev) => (hasLiked ? prev - 1 : prev + 1));
-    onLike(comment.commentId, hasLiked);
-  };
-
-  return (
-    <View style={styles.commentItem}>
-      <Image
-        source={{
-          uri:
-            commenterData?.profilePic ||
-            "https://via.placeholder.com/150.png?text=Profile",
-        }}
-        style={styles.commentProfilePic}
-      />
-      <View style={styles.commentContent}>
-        <View style={styles.commentHeader}>
-          <Text style={[styles.commentUsername, { color: colors.text }]}>
-            @{commenterData?.username || "Anonymous"}
-          </Text>
-        </View>
-        <Text style={[styles.commentText, { color: colors.text }]}>
-          {comment.text}
-        </Text>
-        <View style={styles.commentActions}>
-          <TouchableOpacity
-            onPress={handleLike}
-            style={styles.commentActionButton}
-          >
-            <Ionicons
-              name={hasLiked ? "heart" : "heart-outline"}
-              size={16}
-              color={hasLiked ? colors.like : colors.subtleText}
-            />
-            <Text
-              style={[styles.commentActionText, { color: colors.subtleText }]}
-            >
-              {likeCount > 0 ? likeCount : ""}
+    return (
+      <View style={styles.commentItem}>
+        <Image
+          source={{
+            uri:
+              commenterData?.profilePic ||
+              "https://via.placeholder.com/150.png?text=Profile",
+          }}
+          style={styles.commentProfilePic}
+        />
+        <View style={styles.commentContent}>
+          <View style={styles.commentHeader}>
+            <Text style={[styles.commentUsername, { color: colors.text }]}>
+              @{commenterData?.username || "Anonymous"}
             </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => onReply(comment)}
-            style={styles.commentActionButton}
-          >
-            <Ionicons
-              name="chatbubble-ellipses-outline"
-              size={16}
-              color={colors.subtleText}
-            />
-            <Text
-              style={[styles.commentActionText, { color: colors.subtleText }]}
-            >
-              Reply
-            </Text>
-          </TouchableOpacity>
-        </View>
-        {comment.replies && comment.replies.length > 0 && (
-          <View style={styles.repliesContainer}>
-            {comment.replies.map((reply) => (
-              <CommentItem
-                key={reply.commentId}
-                comment={reply}
-                colors={colors}
-                currentUser={currentUser}
-                onReply={onReply}
-                onLike={onLike}
-              />
-            ))}
           </View>
-        )}
+          <Text style={[styles.commentText, { color: colors.text }]}>
+            {comment.text}
+          </Text>
+          <View style={styles.commentActions}>
+            <TouchableOpacity
+              onPress={handleLike}
+              style={styles.commentActionButton}
+            >
+              <Ionicons
+                name={hasLiked ? "heart" : "heart-outline"}
+                size={16}
+                color={hasLiked ? colors.like : colors.subtleText}
+              />
+              <Text
+                style={[styles.commentActionText, { color: colors.subtleText }]}
+              >
+                {likeCount > 0 ? likeCount : ""}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => onReply(comment)}
+              style={styles.commentActionButton}
+            >
+              <Ionicons
+                name="chatbubble-ellipses-outline"
+                size={16}
+                color={colors.subtleText}
+              />
+              <Text
+                style={[styles.commentActionText, { color: colors.subtleText }]}
+              >
+                Reply
+              </Text>
+            </TouchableOpacity>
+          </View>
+          {comment.replies?.length > 0 && (
+            <View style={styles.repliesContainer}>
+              {comment.replies.map((reply) => (
+                <CommentItem
+                  key={reply.commentId}
+                  comment={reply}
+                  colors={colors}
+                  currentUser={currentUser}
+                  onReply={onReply}
+                  onLike={onLike}
+                />
+              ))}
+            </View>
+          )}
+        </View>
       </View>
-    </View>
-  );
-};
+    );
+  }
+);
 
-// A component to manage and display comments
-const CommentsModal = ({ isVisible, onClose, listingId, colors }) => {
-  const [comments, setComments] = useState([]);
-  const [newComment, setNewComment] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [replyTo, setReplyTo] = useState(null);
-  const currentUser = auth.currentUser;
-  const keyboardHeight = useRef(0);
+const CommentsModal = memo(
+  ({
+    isVisible,
+    onClose,
+    listingId,
+    colors,
+  }: {
+    isVisible: boolean;
+    onClose: () => void;
+    listingId: string | null;
+    colors: any;
+  }) => {
+    const [comments, setComments] = useState<Comment[]>([]);
+    const [newComment, setNewComment] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [replyTo, setReplyTo] = useState<Comment | null>(null);
+    const currentUser = auth.currentUser;
+    const flatListRef = useRef<FlatList>(null);
 
-  // Effect to fetch comments whenever the modal becomes visible
-  useEffect(() => {
-    if (!isVisible || !listingId) return;
-    const fetchComments = async () => {
-      setLoading(true);
+    useEffect(() => {
+      if (!isVisible || !listingId) return;
+
+      const fetchComments = async () => {
+        setLoading(true);
+        try {
+          const listingDocRef = doc(db, "listings", listingId);
+          const docSnap = await getDoc(listingDocRef);
+
+          if (docSnap.exists() && docSnap.data().comments) {
+            setComments(docSnap.data().comments);
+          } else {
+            setComments([]);
+          }
+        } catch (error) {
+          console.error("Error fetching comments:", error);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      fetchComments();
+    }, [isVisible, listingId]);
+
+    const findCommentAndModify = (
+      commentsArray: Comment[],
+      commentId: string,
+      modifier: (comment: Comment) => Comment
+    ): Comment[] => {
+      return commentsArray.map((comment) => {
+        if (comment.commentId === commentId) {
+          return modifier(comment);
+        }
+        if (comment.replies?.length > 0) {
+          return {
+            ...comment,
+            replies: findCommentAndModify(comment.replies, commentId, modifier),
+          };
+        }
+        return comment;
+      });
+    };
+
+    const handlePostComment = async () => {
+      if (!newComment.trim() || !currentUser || !listingId) return;
+
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      const commentData: Comment = {
+        commentId: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        text: newComment.trim(),
+        userId: currentUser.uid,
+        timestamp: new Date().toISOString(),
+        likes: [],
+        replies: [],
+      };
+
       try {
         const listingDocRef = doc(db, "listings", listingId);
-        const docSnap = await getDoc(listingDocRef);
-        if (docSnap.exists() && docSnap.data().comments) {
-          setComments(docSnap.data().comments);
+        let updatedComments: Comment[];
+
+        if (replyTo) {
+          updatedComments = findCommentAndModify(
+            comments,
+            replyTo.commentId,
+            (parent) => ({
+              ...parent,
+              replies: [...(parent.replies || []), commentData],
+            })
+          );
+          setReplyTo(null);
         } else {
-          setComments([]); // Handle case where there are no comments
+          updatedComments = [commentData, ...comments];
+        }
+
+        await updateDoc(listingDocRef, { comments: updatedComments });
+        setComments(updatedComments);
+        setNewComment("");
+
+        if (flatListRef.current && !replyTo) {
+          flatListRef.current.scrollToOffset({ offset: 0, animated: true });
         }
       } catch (error) {
-        console.error("Error fetching comments:", error);
-      } finally {
-        setLoading(false);
+        console.error("Error posting comment:", error);
       }
     };
-    fetchComments();
-  }, [isVisible, listingId]);
 
-  // Recursively find and modify a comment or its reply
-  const findCommentAndModify = (commentsArray, commentId, modifier) => {
-    return commentsArray.map((comment) => {
-      if (comment.commentId === commentId) {
-        return modifier(comment);
-      }
-      if (comment.replies && comment.replies.length > 0) {
-        return {
-          ...comment,
-          replies: findCommentAndModify(comment.replies, commentId, modifier),
-        };
-      }
-      return comment;
-    });
-  };
+    const handleLikeComment = async (commentId: string, hasLiked: boolean) => {
+      if (!currentUser || !listingId) return;
 
-  const handlePostComment = async () => {
-    if (!newComment.trim() || !currentUser) return;
-    Vibration.vibrate(50);
-    const commentData = {
-      commentId: new Date().getTime().toString(),
-      text: newComment.trim(),
-      userId: currentUser.uid,
-      timestamp: new Date().toISOString(),
-      likes: [],
-      replies: [],
+      const newComments = findCommentAndModify(
+        comments,
+        commentId,
+        (comment) => {
+          const updatedLikes = hasLiked
+            ? comment.likes.filter((uid) => uid !== currentUser.uid)
+            : [...comment.likes, currentUser.uid];
+          return { ...comment, likes: updatedLikes };
+        }
+      );
+
+      try {
+        const listingDocRef = doc(db, "listings", listingId);
+        await updateDoc(listingDocRef, { comments: newComments });
+        setComments(newComments);
+      } catch (error) {
+        console.error("Error liking comment:", error);
+      }
     };
 
-    try {
-      const listingDocRef = doc(db, "listings", listingId);
-      let updatedComments;
+    const handleReply = useCallback(async (comment: Comment) => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      const user = await fetchUser(comment.userId);
+      setReplyTo({ ...comment, userUsername: user?.username || "Anonymous" });
+    }, []);
 
-      if (replyTo) {
-        // Find the parent comment and add the reply to its replies array
-        const newComments = findCommentAndModify(
-          comments,
-          replyTo.commentId,
-          (parentComment) => {
-            return {
-              ...parentComment,
-              replies: [...parentComment.replies, commentData],
-            };
-          }
-        );
-        updatedComments = newComments;
-        setReplyTo(null);
-      } else {
-        // Add a new top-level comment
-        updatedComments = [commentData, ...comments];
-      }
-
-      await updateDoc(listingDocRef, {
-        comments: updatedComments,
-      });
-
-      setComments(updatedComments);
+    const clearReply = () => {
+      setReplyTo(null);
       setNewComment("");
-    } catch (error) {
-      console.error("Error posting comment:", error);
-    }
-  };
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    };
 
-  const handleLikeComment = async (commentId, hasLiked) => {
-    if (!currentUser) return;
+    const onGestureEvent = ({ nativeEvent }: { nativeEvent: any }) => {
+      if (nativeEvent.translationY > 100) onClose();
+    };
 
-    const newComments = findCommentAndModify(comments, commentId, (comment) => {
-      const updatedLikes = hasLiked
-        ? comment.likes.filter((uid) => uid !== currentUser.uid)
-        : [...comment.likes, currentUser.uid];
-      return { ...comment, likes: updatedLikes };
-    });
-
-    try {
-      const listingDocRef = doc(db, "listings", listingId);
-      await updateDoc(listingDocRef, {
-        comments: newComments,
-      });
-      setComments(newComments);
-    } catch (error) {
-      console.error("Error liking comment:", error);
-    }
-  };
-
-  const handleReply = useCallback((comment) => {
-    setReplyTo(comment);
-    Vibration.vibrate(10);
-  }, []);
-
-  const clearReply = () => {
-    setReplyTo(null);
-    setNewComment("");
-    Vibration.vibrate(10);
-  };
-
-  const onGestureEvent = ({ nativeEvent }) => {
-    if (nativeEvent.translationY > 100) {
-      onClose();
-    }
-  };
-
-  return (
-    <Modal
-      visible={isVisible}
-      animationType="slide"
-      onRequestClose={onClose}
-      transparent
-    >
-      <GestureHandlerRootView style={{ flex: 1 }}>
-        <KeyboardAvoidingView
-          style={styles.modalContainer}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-          keyboardVerticalOffset={
-            Platform.OS === "ios" ? 0 : -keyboardHeight.current
-          }
-        >
-          <PanGestureHandler onGestureEvent={onGestureEvent}>
-            <Animated.View
-              style={[
-                styles.commentsBox,
-                { backgroundColor: colors.background },
-              ]}
-            >
-              <View
+    return (
+      <Modal
+        visible={isVisible}
+        animationType="slide"
+        onRequestClose={onClose}
+        transparent
+      >
+        <GestureHandlerRootView style={{ flex: 1 }}>
+          <KeyboardAvoidingView
+            style={styles.modalContainer}
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+          >
+            <PanGestureHandler onGestureEvent={onGestureEvent}>
+              <Animated.View
                 style={[
-                  styles.commentsHeader,
-                  { borderBottomColor: colors.border },
+                  styles.commentsBox,
+                  { backgroundColor: colors.background },
                 ]}
               >
-                <View style={styles.grabber} />
-                <Text style={[styles.commentsTitle, { color: colors.text }]}>
-                  Comments
-                </Text>
-                <TouchableOpacity onPress={onClose}>
-                  <Ionicons name="close" size={24} color={colors.subtleText} />
-                </TouchableOpacity>
-              </View>
-              {loading ? (
-                <ActivityIndicator
-                  size="small"
-                  color={colors.loading}
-                  style={{ marginVertical: 20 }}
-                />
-              ) : (
-                <FlatList
-                  data={comments}
-                  keyExtractor={(item) => item.commentId}
-                  renderItem={({ item }) => (
-                    <CommentItem
-                      comment={item}
-                      colors={colors}
-                      currentUser={currentUser}
-                      onReply={handleReply}
-                      onLike={handleLikeComment}
-                    />
-                  )}
-                  contentContainerStyle={{ paddingBottom: 20 }}
-                />
-              )}
-              <View
-                style={[
-                  styles.commentInputContainer,
-                  { borderTopColor: colors.border },
-                ]}
-              >
-                <View style={{ flex: 1 }}>
-                  {replyTo && (
-                    <View
-                      style={[
-                        styles.replyingTo,
-                        {
-                          backgroundColor: colors.card,
-                          borderBottomColor: colors.border,
-                        },
-                      ]}
-                    >
-                      <Text style={{ color: colors.text }}>
-                        Replying to @{replyTo.userUsername}
-                      </Text>
-                      <TouchableOpacity onPress={clearReply}>
-                        <Ionicons
-                          name="close"
-                          size={16}
-                          color={colors.subtleText}
-                        />
-                      </TouchableOpacity>
-                    </View>
-                  )}
-                  <TextInput
-                    style={[
-                      styles.commentInput,
-                      { color: colors.text, backgroundColor: colors.card },
-                    ]}
-                    placeholder={
-                      replyTo
-                        ? `Add a reply to @${replyTo.userUsername}...`
-                        : "Add a comment..."
-                    }
-                    placeholderTextColor={colors.subtleText}
-                    value={newComment}
-                    onChangeText={setNewComment}
-                    multiline
-                  />
-                </View>
-                <TouchableOpacity
-                  onPress={handlePostComment}
-                  style={{ paddingLeft: 10 }}
+                <View
+                  style={[
+                    styles.commentsHeader,
+                    { borderBottomColor: colors.border },
+                  ]}
                 >
-                  <Ionicons name="send" size={24} color={colors.tint} />
-                </TouchableOpacity>
-              </View>
-            </Animated.View>
-          </PanGestureHandler>
-        </KeyboardAvoidingView>
-      </GestureHandlerRootView>
-    </Modal>
-  );
-};
+                  <View style={styles.grabber} />
+                  <Text style={[styles.commentsTitle, { color: colors.text }]}>
+                    Comments
+                  </Text>
+                  <TouchableOpacity onPress={onClose}>
+                    <Ionicons
+                      name="close"
+                      size={24}
+                      color={colors.subtleText}
+                    />
+                  </TouchableOpacity>
+                </View>
 
-// Memoized and animated component for each listing
+                {loading ? (
+                  <ActivityIndicator
+                    size="small"
+                    color={colors.loading}
+                    style={{ marginVertical: 20 }}
+                  />
+                ) : (
+                  <FlatList
+                    ref={flatListRef}
+                    data={comments}
+                    keyExtractor={(item) => item.commentId}
+                    renderItem={({ item }) => (
+                      <CommentItem
+                        comment={item}
+                        colors={colors}
+                        currentUser={currentUser}
+                        onReply={handleReply}
+                        onLike={handleLikeComment}
+                      />
+                    )}
+                    contentContainerStyle={{ paddingBottom: 20 }}
+                    initialNumToRender={5}
+                    maxToRenderPerBatch={5}
+                    windowSize={5}
+                  />
+                )}
+
+                <View
+                  style={[
+                    styles.commentInputContainer,
+                    { borderTopColor: colors.border },
+                  ]}
+                >
+                  <View style={{ flex: 1 }}>
+                    {replyTo && (
+                      <View
+                        style={[
+                          styles.replyingTo,
+                          {
+                            backgroundColor: colors.card,
+                            borderBottomColor: colors.border,
+                          },
+                        ]}
+                      >
+                        <Text style={{ color: colors.text }}>
+                          Replying to @{replyTo.userUsername || "Anonymous"}
+                        </Text>
+                        <TouchableOpacity onPress={clearReply}>
+                          <Ionicons
+                            name="close"
+                            size={16}
+                            color={colors.subtleText}
+                          />
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                    <TextInput
+                      style={[
+                        styles.commentInput,
+                        { color: colors.text, backgroundColor: colors.card },
+                      ]}
+                      placeholder={
+                        replyTo
+                          ? `Add a reply to @${
+                              replyTo.userUsername || "user"
+                            }...`
+                          : "Add a comment..."
+                      }
+                      placeholderTextColor={colors.subtleText}
+                      value={newComment}
+                      onChangeText={setNewComment}
+                      multiline
+                    />
+                  </View>
+                  <TouchableOpacity
+                    onPress={handlePostComment}
+                    disabled={!newComment.trim()}
+                    style={{ paddingLeft: 10 }}
+                  >
+                    <Ionicons
+                      name="send"
+                      size={24}
+                      color={
+                        newComment.trim() ? colors.tint : colors.subtleText
+                      }
+                    />
+                  </TouchableOpacity>
+                </View>
+              </Animated.View>
+            </PanGestureHandler>
+          </KeyboardAvoidingView>
+        </GestureHandlerRootView>
+      </Modal>
+    );
+  }
+);
+
 const ListingItem = memo(
-  ({ item, isCurrent, colors, onCommentPress, onLikePress, currentUser }) => {
+  ({
+    item,
+    isCurrent,
+    colors,
+    onCommentPress,
+    onLikePress,
+    currentUser,
+  }: {
+    item: ListingItem;
+    isCurrent: boolean;
+    colors: any;
+    onCommentPress: (listingId: string) => void;
+    onLikePress: (listingId: string, hasLiked: boolean) => void;
+    currentUser: any;
+  }) => {
     const [hasLiked, setHasLiked] = useState(
       item.likes?.includes(currentUser?.uid)
     );
     const [likeCount, setLikeCount] = useState(item.likes?.length || 0);
     const [isSaved, setIsSaved] = useState(false);
-    const imageListRef = useRef(null);
-    const [activeImageIndex, setActiveImageIndex] = useState(0);
+    const [activeMediaIndex, setActiveMediaIndex] = useState(0);
+    const [expanded, setExpanded] = useState(false);
+    const videoRefs = useRef<VideoRefs>({});
 
-    // Check if the listing is saved by the current user
+    const scale = useSharedValue(0);
+    const animatedHeartStyle = useAnimatedStyle(() => ({
+      transform: [{ scale: Math.max(scale.value, 0) }],
+      opacity: scale.value,
+    }));
+
+    const mediaToDisplay: MediaItem[] = [
+      ...(item.videos?.map((url) => ({ url, type: "video" } as MediaItem)) ||
+        []),
+      ...(item.images?.map((url) => ({ url, type: "image" } as MediaItem)) ||
+        []),
+    ];
+
+    const hasMultipleMedia = mediaToDisplay.length > 1;
+    const needsTruncation = item.description && item.description.length > 100;
+
+    useEffect(() => {
+      return () => {
+        Object.values(videoRefs.current).forEach((video) => {
+          if (video) {
+            video.stopAsync();
+          }
+        });
+        videoRefs.current = {};
+      };
+    }, []);
+
+    useEffect(() => {
+      if (isCurrent) {
+        const activeMedia = mediaToDisplay[activeMediaIndex];
+        if (
+          activeMedia?.type === "video" &&
+          videoRefs.current[activeMedia.url]
+        ) {
+          videoRefs.current[activeMedia.url]?.playAsync();
+        }
+      } else {
+        Object.values(videoRefs.current).forEach((video) => {
+          if (video) {
+            video.pauseAsync();
+          }
+        });
+      }
+    }, [isCurrent, activeMediaIndex, mediaToDisplay]);
+
     useEffect(() => {
       if (!currentUser) return;
+
       const checkSavedStatus = async () => {
         const userDoc = await getDoc(doc(db, "users", currentUser.uid));
         if (userDoc.exists()) {
           const savedListings = userDoc.data().savedListings || [];
-          // Use item.postId to check if the listing is saved
           setIsSaved(savedListings.includes(item.postId));
         }
       };
       checkSavedStatus();
     }, [currentUser, item.postId]);
 
-    useEffect(() => {
-      let timer;
-      if (isCurrent && item.images && item.images.length > 1) {
-        timer = setInterval(() => {
-          setActiveImageIndex((prevIndex) => {
-            const nextIndex = (prevIndex + 1) % item.images.length;
-            if (imageListRef.current) {
-              imageListRef.current.scrollToIndex({
-                animated: true,
-                index: nextIndex,
-              });
-            }
-            return nextIndex;
-          });
-        }, 3000);
-      }
-      return () => {
-        if (timer) {
-          clearInterval(timer);
+    const handleLike = useCallback(
+      (triggerHaptic = true) => {
+        if (triggerHaptic) {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         }
-      };
-    }, [isCurrent, item.images]);
 
-    const handleLike = useCallback(() => {
-      Vibration.vibrate(50);
-      const isLiking = !hasLiked;
-      setHasLiked(isLiking);
-      setLikeCount((prev) => (isLiking ? prev + 1 : prev - 1));
-      onLikePress(item.id, !isLiking);
-    }, [hasLiked, item.id, onLikePress]);
+        const isLiking = !hasLiked;
+        setHasLiked(isLiking);
+        setLikeCount((prev) => (isLiking ? prev + 1 : prev - 1));
+        onLikePress(item.id, !isLiking);
+      },
+      [hasLiked, item.id, onLikePress]
+    );
+
+    const doubleTap = Gesture.Tap()
+      .numberOfTaps(2)
+      .maxDuration(250)
+      .onStart(() => {
+        runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Light);
+        scale.value = withSpring(1, undefined, (finished) => {
+          if (finished) scale.value = withSpring(0);
+        });
+
+        if (!hasLiked) {
+          runOnJS(handleLike)(false);
+        }
+      });
 
     const handleSave = async () => {
       if (!currentUser) return;
-      Vibration.vibrate(50);
+
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       const userDocRef = doc(db, "users", currentUser.uid);
       const listingDocRef = doc(db, "listings", item.id);
       const newSavedStatus = !isSaved;
+
       setIsSaved(newSavedStatus);
       try {
-        // Update the user's savedListings array with the item's postId
         await updateDoc(userDocRef, {
           savedListings: newSavedStatus
             ? arrayUnion(item.postId)
             : arrayRemove(item.postId),
         });
-
-        // Also update the listing's savedBy array with the user's uid
         await updateDoc(listingDocRef, {
           savedBy: newSavedStatus
             ? arrayUnion(currentUser.uid)
@@ -495,64 +631,88 @@ const ListingItem = memo(
       }
     };
 
-    const onScroll = (event) => {
+    const onMediaScroll = useCallback((event: any) => {
       const slideSize = event.nativeEvent.layoutMeasurement.width;
       const index = Math.floor(event.nativeEvent.contentOffset.x / slideSize);
-      setActiveImageIndex(index);
-    };
+      setActiveMediaIndex(index);
+    }, []);
 
-    const renderImage = useCallback(
-      ({ item: imageUrl }) => (
-        <View style={styles.imageSlide}>
-          <Image
-            source={{
-              uri:
-                imageUrl ||
-                "https://via.placeholder.com/400x800.png?text=No+Image",
-            }}
-            style={styles.image}
-            resizeMode="cover"
-          />
-        </View>
-      ),
-      []
+    const renderMedia = useCallback(
+      ({ item: media, index }: { item: MediaItem; index: number }) => {
+        return (
+          <GestureDetector gesture={doubleTap}>
+            <View style={styles.mediaContainer}>
+              {media.type === "video" ? (
+                <Video
+                  ref={(ref) => {
+                    if (ref) {
+                      videoRefs.current[media.url] = ref;
+                    } else {
+                      delete videoRefs.current[media.url];
+                    }
+                  }}
+                  source={{ uri: media.url }}
+                  style={styles.media}
+                  resizeMode="cover"
+                  isLooping
+                  shouldPlay={isCurrent && index === activeMediaIndex}
+                  useNativeControls={false}
+                  onPlaybackStatusUpdate={(status: AVPlaybackStatus) => {
+                    if (
+                      status.isLoaded &&
+                      !status.isPlaying &&
+                      isCurrent &&
+                      index === activeMediaIndex
+                    ) {
+                      videoRefs.current[media.url]?.playAsync();
+                    }
+                  }}
+                />
+              ) : (
+                <Image
+                  source={{
+                    uri:
+                      media.url ||
+                      "https://via.placeholder.com/400x800.png?text=No+Image",
+                  }}
+                  style={styles.media}
+                  resizeMode="cover"
+                />
+              )}
+              <Animated.View style={[styles.heartOverlay, animatedHeartStyle]}>
+                <Ionicons name="heart" size={100} color="#fff" />
+              </Animated.View>
+            </View>
+          </GestureDetector>
+        );
+      },
+      [isCurrent, activeMediaIndex, doubleTap]
     );
-
-    const images =
-      item.images && item.images.length > 0
-        ? item.images
-        : ["https://via.placeholder.com/400x800.png?text=No+Image"];
 
     return (
       <View style={styles.listingContainer}>
         <FlatList
-          ref={imageListRef}
-          data={images}
-          renderItem={renderImage}
-          keyExtractor={(_, index) => `image-${index}`}
+          data={
+            mediaToDisplay.length > 0
+              ? mediaToDisplay
+              : [{ url: "", type: "image" }]
+          }
+          renderItem={renderMedia}
+          keyExtractor={(_, index) => `media-${index}`}
           horizontal
           pagingEnabled
           showsHorizontalScrollIndicator={false}
-          scrollEnabled={false}
-          onScroll={onScroll}
+          onScroll={onMediaScroll}
           scrollEventThrottle={16}
-          style={{ width, height }}
+          style={styles.mediaList}
         />
+
         <View style={styles.overlay} />
 
         {isCurrent && (
           <Animated.View style={styles.content} layout={Layout.springify()}>
-            {/* Left side content */}
             <View style={styles.leftContent}>
               <View style={styles.userHeader}>
-                <Image
-                  source={{
-                    uri:
-                      item.ownerProfilePicture ||
-                      "https://via.placeholder.com/150.png?text=Profile",
-                  }}
-                  style={styles.profilePic}
-                />
                 <View>
                   <Animated.Text
                     entering={FadeIn.delay(200).duration(500)}
@@ -561,15 +721,32 @@ const ListingItem = memo(
                   >
                     @{item.ownerUsername}
                   </Animated.Text>
-                  <Animated.Text
-                    entering={FadeIn.delay(300).duration(500)}
-                    style={[styles.description, { color: colors.textOnImage }]}
-                    numberOfLines={3}
-                  >
-                    {item.description}
-                  </Animated.Text>
                 </View>
               </View>
+
+              <View style={styles.textContainer}>
+                {item.title && (
+                  <Text style={[styles.title, { color: colors.textOnImage }]}>
+                    {item.title}
+                  </Text>
+                )}
+
+                <Text
+                  style={[styles.description, { color: colors.textOnImage }]}
+                  numberOfLines={expanded ? undefined : 3}
+                >
+                  {item.description}
+                </Text>
+
+                {needsTruncation && (
+                  <TouchableOpacity onPress={() => setExpanded(!expanded)}>
+                    <Text style={[styles.readMore, { color: colors.tint }]}>
+                      {expanded ? "Show Less" : "Read More"}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
               <View style={styles.detailsRow}>
                 <Ionicons
                   name="pricetag-outline"
@@ -596,11 +773,24 @@ const ListingItem = memo(
               </View>
             </View>
 
-            {/* Right side interactions */}
             <View style={styles.rightContent}>
               <TouchableOpacity
                 style={styles.actionButton}
-                onPress={handleLike}
+                onPress={() => console.log("Navigate to profile")}
+              >
+                <Image
+                  source={{
+                    uri:
+                      item.ownerProfilePicture ||
+                      "https://via.placeholder.com/150.png?text=Profile",
+                  }}
+                  style={styles.rightProfilePic}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.actionButton}
+                onPress={() => handleLike()}
               >
                 <Ionicons
                   name={hasLiked ? "heart" : "heart-outline"}
@@ -632,7 +822,10 @@ const ListingItem = memo(
 
               <TouchableOpacity
                 style={styles.actionButton}
-                onPress={() => onCommentPress(item.id)}
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  onCommentPress(item.id);
+                }}
               >
                 <Ionicons
                   name="chatbubble-ellipses-outline"
@@ -648,16 +841,17 @@ const ListingItem = memo(
             </View>
           </Animated.View>
         )}
-        {images.length > 1 && (
+
+        {hasMultipleMedia && (
           <View style={styles.paginationContainer}>
-            {images.map((_, index) => (
+            {mediaToDisplay.map((_, index) => (
               <View
                 key={index}
                 style={[
                   styles.paginationDot,
                   {
                     backgroundColor:
-                      activeImageIndex === index
+                      activeMediaIndex === index
                         ? colors.textOnImage
                         : "rgba(255, 255, 255, 0.5)",
                   },
@@ -672,7 +866,9 @@ const ListingItem = memo(
 );
 
 export default function Index() {
-  const { isDark } = useColorScheme();
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme === "dark";
+
   const colors = {
     background: isDark ? "#000" : "#f0f2f5",
     textOnImage: "#fff",
@@ -686,46 +882,52 @@ export default function Index() {
     border: isDark ? "#374151" : "#e5e7eb",
   };
 
-  const [listings, setListings] = useState([]);
+  const [listings, setListings] = useState<ListingItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [lastVisible, setLastVisible] = useState(null);
+  const [lastVisible, setLastVisible] = useState<any>(null);
   const [hasMore, setHasMore] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isCommentsModalVisible, setIsCommentsModalVisible] = useState(false);
-  const [currentListingId, setCurrentListingId] = useState(null);
+  const [currentListingId, setCurrentListingId] = useState<string | null>(null);
   const currentUser = auth.currentUser;
+  const flatListRef = useRef<FlatList>(null);
 
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 50 }).current;
-  const onViewableItemsChanged = useRef(({ viewableItems }) => {
-    if (viewableItems.length > 0) {
-      setCurrentIndex(viewableItems[0].index);
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 70 }).current;
+  const onViewableItemsChanged = useRef(
+    ({ viewableItems }: { viewableItems: any[] }) => {
+      if (viewableItems.length > 0) {
+        setCurrentIndex(viewableItems[0].index);
+      }
     }
-  }).current;
+  ).current;
 
   const fetchListings = useCallback(
     async (isRefresh = false) => {
       if (!hasMore && !isRefresh) return;
+
       try {
         setLoading(true);
         const listingsRef = collection(db, "listings");
-        // NOTE: The `orderBy` clause requires a Firestore index on `datePosted`.
-        // If you encounter an error, create this index in your Firebase console.
-        let q = query(listingsRef, orderBy("datePosted", "desc"), limit(10));
+        let q = query(listingsRef, orderBy("datePosted", "desc"), limit(5));
+
         if (lastVisible && !isRefresh) {
           q = query(
             listingsRef,
             orderBy("datePosted", "desc"),
             startAfter(lastVisible),
-            limit(10)
+            limit(5)
           );
         }
 
         const querySnapshot = await getDocs(q);
-        const fetchedListings = querySnapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
+        const fetchedListings = querySnapshot.docs.map(
+          (doc) =>
+            ({
+              id: doc.id,
+              ...doc.data(),
+            } as ListingItem)
+        );
 
         if (isRefresh) {
           setListings(fetchedListings);
@@ -734,7 +936,7 @@ export default function Index() {
         } else if (fetchedListings.length === 0) {
           setHasMore(false);
         } else {
-          setListings((prevListings) => [...prevListings, ...fetchedListings]);
+          setListings((prev) => [...prev, ...fetchedListings]);
           setLastVisible(querySnapshot.docs[querySnapshot.docs.length - 1]);
         }
       } catch (error) {
@@ -753,13 +955,14 @@ export default function Index() {
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    Vibration.vibrate(50);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     fetchListings(true);
   }, [fetchListings]);
 
   const handleLikePress = useCallback(
-    async (listingId, hasLiked) => {
+    async (listingId: string, hasLiked: boolean) => {
       if (!currentUser) return;
+
       try {
         const listingDocRef = doc(db, "listings", listingId);
         await updateDoc(listingDocRef, {
@@ -774,20 +977,23 @@ export default function Index() {
     [currentUser]
   );
 
-  const handleCommentPress = useCallback((listingId) => {
+  const handleCommentPress = useCallback((listingId: string) => {
     setCurrentListingId(listingId);
     setIsCommentsModalVisible(true);
   }, []);
 
-  const renderItem = ({ item, index }) => (
-    <ListingItem
-      item={item}
-      isCurrent={index === currentIndex}
-      colors={colors}
-      onCommentPress={handleCommentPress}
-      onLikePress={handleLikePress}
-      currentUser={currentUser}
-    />
+  const renderItem = useCallback(
+    ({ item, index }: { item: ListingItem; index: number }) => (
+      <ListingItem
+        item={item}
+        isCurrent={index === currentIndex}
+        colors={colors}
+        onCommentPress={handleCommentPress}
+        onLikePress={handleLikePress}
+        currentUser={currentUser}
+      />
+    ),
+    [currentIndex, colors, handleCommentPress, handleLikePress, currentUser]
   );
 
   const renderFooter = () => {
@@ -813,46 +1019,56 @@ export default function Index() {
   };
 
   return (
-    <SafeAreaView
-      style={[styles.container, { backgroundColor: colors.background }]}
-    >
-      <StatusBar barStyle={isDark ? "light-content" : "dark-content"} />
-      {loading && listings.length === 0 ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={colors.loading} />
-        </View>
-      ) : (
-        <FlatList
-          data={listings}
-          renderItem={renderItem}
-          keyExtractor={(item) => item.id}
-          snapToInterval={height}
-          decelerationRate="fast"
-          showsVerticalScrollIndicator={false}
-          pagingEnabled
-          onEndReached={fetchListings}
-          onEndReachedThreshold={0.5}
-          viewabilityConfig={viewabilityConfig}
-          onViewableItemsChanged={onViewableItemsChanged}
-          ListFooterComponent={renderFooter}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.tint}
-            />
-          }
-          windowSize={3}
-          removeClippedSubviews={true}
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaView
+        style={[styles.container, { backgroundColor: colors.background }]}
+      >
+        <StatusBar
+          barStyle={isDark ? "light-content" : "dark-content"}
+          backgroundColor={colors.background}
         />
-      )}
-      <CommentsModal
-        isVisible={isCommentsModalVisible}
-        onClose={() => setIsCommentsModalVisible(false)}
-        listingId={currentListingId}
-        colors={colors}
-      />
-    </SafeAreaView>
+
+        {loading && listings.length === 0 ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={colors.loading} />
+          </View>
+        ) : (
+          <FlatList
+            ref={flatListRef}
+            data={listings}
+            renderItem={renderItem}
+            keyExtractor={(item) => item.id}
+            snapToInterval={height}
+            decelerationRate="fast"
+            showsVerticalScrollIndicator={false}
+            pagingEnabled
+            onEndReached={fetchListings}
+            onEndReachedThreshold={0.1}
+            viewabilityConfig={viewabilityConfig}
+            onViewableItemsChanged={onViewableItemsChanged}
+            ListFooterComponent={renderFooter}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor={colors.tint}
+              />
+            }
+            initialNumToRender={3}
+            maxToRenderPerBatch={3}
+            windowSize={5}
+            removeClippedSubviews
+          />
+        )}
+
+        <CommentsModal
+          isVisible={isCommentsModalVisible}
+          onClose={() => setIsCommentsModalVisible(false)}
+          listingId={currentListingId}
+          colors={colors}
+        />
+      </SafeAreaView>
+    </GestureHandlerRootView>
   );
 }
 
@@ -866,21 +1082,29 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   listingContainer: {
-    width: width,
-    height: height,
+    width,
+    height,
     justifyContent: "flex-end",
   },
-  imageSlide: {
-    width: width,
-    height: height,
+  mediaList: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 0,
   },
-  image: {
+  mediaContainer: {
+    width,
+    height,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  media: {
     width: "100%",
     height: "100%",
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(0,0,0,0.4)",
+    zIndex: 1,
+    pointerEvents: "none",
   },
   content: {
     position: "absolute",
@@ -892,14 +1116,30 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
     padding: 16,
     paddingBottom: Platform.OS === "ios" ? 40 : 16,
+    zIndex: 2,
+    pointerEvents: "box-none",
   },
   leftContent: {
     flex: 1,
     paddingRight: 10,
     paddingBottom: 20,
+    pointerEvents: "none",
+  },
+  textContainer: {
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  title: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 6,
+    textShadowColor: "rgba(0,0,0,0.7)",
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
   rightContent: {
     alignItems: "center",
+    pointerEvents: "auto",
   },
   userHeader: {
     flexDirection: "row",
@@ -914,6 +1154,13 @@ const styles = StyleSheet.create({
     borderColor: "white",
     marginRight: 10,
   },
+  rightProfilePic: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: "white",
+  },
   username: {
     fontSize: 18,
     fontWeight: "bold",
@@ -927,7 +1174,14 @@ const styles = StyleSheet.create({
     textShadowColor: "rgba(0,0,0,0.7)",
     textShadowOffset: { width: 1, height: 1 },
     textShadowRadius: 2,
+  },
+  readMore: {
+    fontSize: 14,
+    fontWeight: "500",
     marginTop: 4,
+    textShadowColor: "rgba(0,0,0,0.7)",
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
   detailsRow: {
     flexDirection: "row",
@@ -965,14 +1219,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "bold",
   },
-  // Modal and Comments Styles
   modalContainer: {
     flex: 1,
     justifyContent: "flex-end",
   },
   commentsBox: {
     width: "100%",
-    height: "70%",
+    height: "75%",
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     paddingTop: 16,
@@ -1088,11 +1341,18 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     marginBottom: 10,
+    zIndex: 3,
   },
   paginationDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
     marginHorizontal: 4,
+  },
+  heartOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "center",
+    alignItems: "center",
+    pointerEvents: "none",
   },
 });

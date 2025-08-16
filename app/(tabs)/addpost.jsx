@@ -12,11 +12,9 @@ import {
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
-import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import { getDownloadURL, ref, uploadBytesResumable } from "firebase/storage";
 import { useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Alert,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -79,58 +77,177 @@ const CONDITIONS = [
   "For Parts",
 ];
 
+// Reusable Modal Picker Component
+const ModalPicker = ({
+  isVisible,
+  title,
+  items,
+  selectedItem,
+  onSelect,
+  onClose,
+  isDark,
+}) => {
+  const colors = COLORS[isDark ? "dark" : "light"];
+
+  return (
+    <Modal
+      visible={isVisible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <BlurView
+        intensity={30}
+        tint={isDark ? "dark" : "light"}
+        style={styles.modalContainer}
+      >
+        <Animated.View
+          entering={FadeInDown.duration(300)}
+          style={[styles.modalContent, { backgroundColor: colors.card }]}
+        >
+          <Text style={[styles.modalTitle, { color: colors.text }]}>
+            {title}
+          </Text>
+
+          {items.map((item) => (
+            <Pressable
+              key={item}
+              style={styles.modalItem}
+              onPress={() => {
+                onSelect(item);
+                onClose();
+              }}
+            >
+              <Text
+                style={[
+                  styles.modalItemText,
+                  {
+                    color: selectedItem === item ? colors.tint : colors.text,
+                  },
+                ]}
+              >
+                {item}
+              </Text>
+            </Pressable>
+          ))}
+        </Animated.View>
+      </BlurView>
+    </Modal>
+  );
+};
+
+// Custom Message Box component to replace Alert
+const MessageBox = ({ isVisible, title, message, onClose, isDark }) => {
+  const colors = COLORS[isDark ? "dark" : "light"];
+  return (
+    <Modal
+      visible={isVisible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <BlurView
+        intensity={30}
+        tint={isDark ? "dark" : "light"}
+        style={styles.modalContainer}
+      >
+        <Animated.View
+          entering={FadeInDown.duration(300)}
+          style={[styles.modalContent, { backgroundColor: colors.card }]}
+        >
+          <Text style={[styles.modalTitle, { color: colors.text }]}>
+            {title}
+          </Text>
+          <Text style={[styles.modalMessage, { color: colors.text }]}>
+            {message}
+          </Text>
+          <TouchableOpacity
+            onPress={onClose}
+            style={[styles.messageBoxButton, { backgroundColor: colors.tint }]}
+          >
+            <Text style={styles.messageBoxButtonText}>OK</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      </BlurView>
+    </Modal>
+  );
+};
+
 export default function AddPostPage() {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";
   const colors = COLORS[isDark ? "dark" : "light"];
 
-  // Form states
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [category, setCategory] = useState("");
-  const [condition, setCondition] = useState("");
-  const [images, setImages] = useState([]);
-  const [exchangeFor, setExchangeFor] = useState("");
-  const [tags, setTags] = useState("");
-  const [openToAnyOffer, setOpenToAnyOffer] = useState(false);
-  const [location, setLocation] = useState({
-    lat: 5.56,
-    lng: -0.205,
+  // Form state
+  const [form, setForm] = useState({
+    title: "",
+    description: "",
+    category: "",
+    condition: "",
+    exchangeFor: "",
+    price: "",
+    tags: "",
+    openToAnyOffer: false,
+    openToCashOffer: false,
+    location: {
+      lat: 5.56,
+      lng: -0.205,
+    },
   });
 
-  // UI states
-  const [uploading, setUploading] = useState(false);
+  // UI state
+  const [media, setMedia] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [showConditionModal, setShowConditionModal] = useState(false);
+  const [messageBox, setMessageBox] = useState({
+    isVisible: false,
+    title: "",
+    message: "",
+  });
 
   const mapRef = useRef(null);
 
-  const pickImages = async () => {
+  const handleInputChange = (key, value) => {
+    setForm((prevForm) => ({ ...prevForm, [key]: value }));
+  };
+
+  const showMessage = (title, message) => {
+    setMessageBox({ isVisible: true, title, message });
+  };
+
+  const hideMessage = () => {
+    setMessageBox({ ...messageBox, isVisible: false });
+  };
+
+  const pickMedia = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ImagePicker.MediaTypeOptions.All,
       allowsMultipleSelection: true,
       quality: 0.8,
-      aspect: [4, 3],
+      selectionLimit: 5 - media.length,
     });
 
     if (!result.canceled && result.assets.length > 0) {
-      const newImages = result.assets.slice(0, 5 - images.length);
-      setImages([...images, ...newImages.map((a) => a.uri)]);
+      const newMedia = result.assets.map((asset) => ({
+        uri: asset.uri,
+        type: asset.type,
+      }));
+      setMedia([...media, ...newMedia]);
     }
   };
 
-  const removeImage = (index) => {
-    const newImages = [...images];
-    newImages.splice(index, 1);
-    setImages(newImages);
+  const removeMedia = (index) => {
+    const newMedia = [...media];
+    newMedia.splice(index, 1);
+    setMedia(newMedia);
   };
 
   const handleMapPress = (e) => {
     const { latitude, longitude } = e.nativeEvent.coordinate;
-    setLocation({ lat: latitude, lng: longitude });
+    handleInputChange("location", { lat: latitude, lng: longitude });
 
-    // Center map on tapped location
     mapRef.current.animateToRegion(
       {
         latitude,
@@ -142,85 +259,115 @@ export default function AddPostPage() {
     );
   };
 
-  const uploadImages = async () => {
+  const uploadMedia = async () => {
     const urls = [];
+    const totalFiles = media.length;
+    let completedUploads = 0;
 
-    for (const uri of images) {
+    for (const item of media) {
       try {
-        const response = await fetch(uri);
+        const response = await fetch(item.uri);
         const blob = await response.blob();
+        const filename = item.uri.substring(item.uri.lastIndexOf("/") + 1);
+        const storageRef = ref(storage, `postMedia/${Date.now()}-${filename}`);
+        const uploadTask = uploadBytesResumable(storageRef, blob);
 
-        // Create unique filename
-        const filename = uri.substring(uri.lastIndexOf("/") + 1);
-        const storageRef = ref(storage, `postImages/${Date.now()}-${filename}`);
-
-        await uploadBytes(storageRef, blob);
-        const downloadURL = await getDownloadURL(storageRef);
-        urls.push(downloadURL);
+        await new Promise((resolve, reject) => {
+          uploadTask.on(
+            "state_changed",
+            (snapshot) => {
+              const progress =
+                (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+              setUploadProgress(
+                Math.round(
+                  ((completedUploads + progress / 100) / totalFiles) * 100
+                )
+              );
+            },
+            (error) => {
+              console.error("Upload error:", error);
+              reject(error);
+            },
+            async () => {
+              const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+              urls.push({ url: downloadURL, type: item.type });
+              completedUploads++;
+              resolve();
+            }
+          );
+        });
       } catch (error) {
-        console.error("Error uploading image:", error);
+        console.error("Error uploading media:", error);
+        showMessage("Error", "Failed to upload one or more files.");
+        setSaving(false);
+        setUploadProgress(0);
+        return null;
       }
     }
-
+    setUploadProgress(100);
     return urls;
   };
 
   const handleSubmit = async () => {
     if (
-      !title ||
-      !description ||
-      !category ||
-      !condition ||
-      images.length === 0
+      !form.title ||
+      !form.description ||
+      !form.category ||
+      !form.condition ||
+      media.length === 0
     ) {
-      Alert.alert(
+      showMessage(
         "Missing Information",
-        "Please fill all required fields and add at least one image"
+        "Please fill all required fields and add at least one image or video."
       );
       return;
     }
 
     setSaving(true);
+    setUploadProgress(0);
 
     try {
-      // Get current user data
       const user = auth.currentUser;
       if (!user) throw new Error("User not authenticated");
 
       const userDoc = await getDoc(doc(db, "users", user.uid));
       const userData = userDoc.data();
 
-      // Upload images to Firebase Storage
-      const imageUrls = await uploadImages();
+      const mediaUrls = await uploadMedia();
+      if (!mediaUrls) {
+        setSaving(false);
+        setUploadProgress(0);
+        return;
+      }
 
-      // Generate a unique postId
       const postId = uuid.v4();
-
-      // Prepare post data
       const postData = {
         postId,
         ownerId: user.uid,
         ownerUsername: userData.username,
         ownerProfilePicture: userData.profilePic || "",
-        title,
-        description,
-        itemCategory: category,
-        condition,
-        images: imageUrls,
+        title: form.title,
+        description: form.description,
+        itemCategory: form.category,
+        condition: form.condition,
+        images: mediaUrls.filter((m) => m.type === "image").map((m) => m.url),
+        videos: mediaUrls.filter((m) => m.type === "video").map((m) => m.url),
         location: {
           region: "Auto-detect",
           city: "Auto-detect",
-          coordinates: location,
+          coordinates: form.location,
         },
-        exchangeFor: exchangeFor
+        exchangeFor: form.exchangeFor
           .split(",")
           .map((item) => item.trim())
           .filter((item) => item),
-        isOpenToAnyOffer: openToAnyOffer,
-        tags: tags
+        tags: form.tags
           .split(",")
           .map((tag) => tag.trim())
           .filter((tag) => tag),
+        price: form.price ? parseFloat(form.price) : null,
+        isOpenToAnyOffer: form.openToAnyOffer,
+        isOpenToCashOffer: form.openToCashOffer,
         postStatus: "active",
         datePosted: serverTimestamp(),
         lastUpdated: serverTimestamp(),
@@ -230,31 +377,118 @@ export default function AddPostPage() {
         comments: [],
       };
 
-      // Save to Firestore with postId as the document ID
       await addDoc(collection(db, "listings"), postData);
-
-      // Add the postId to the user's listings array
       await updateDoc(doc(db, "users", user.uid), {
         listings: arrayUnion(postId),
       });
 
-      Alert.alert("Success", "Your post has been created!");
+      showMessage("Success", "Your post has been created!");
       // Reset form
-      setTitle("");
-      setDescription("");
-      setCategory("");
-      setCondition("");
-      setImages([]);
-      setExchangeFor("");
-      setTags("");
-      setOpenToAnyOffer(false);
+      setForm({
+        title: "",
+        description: "",
+        category: "",
+        condition: "",
+        exchangeFor: "",
+        price: "",
+        tags: "",
+        openToAnyOffer: false,
+        openToCashOffer: false,
+        location: {
+          lat: 5.56,
+          lng: -0.205,
+        },
+      });
+      setMedia([]);
     } catch (error) {
       console.error("Error creating post:", error);
-      Alert.alert("Error", "Failed to create post. Please try again.");
+      showMessage("Error", "Failed to create post. Please try again.");
     } finally {
       setSaving(false);
+      setUploadProgress(0);
     }
   };
+
+  const mapDarkStyle = [
+    { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
+    { elementType: "labels.text.fill", stylers: [{ color: "#746855" }] },
+    { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
+    {
+      featureType: "administrative.locality",
+      elementType: "labels.text.fill",
+      stylers: [{ color: "#d59563" }],
+    },
+    {
+      featureType: "poi",
+      elementType: "labels.text.fill",
+      stylers: [{ color: "#d59563" }],
+    },
+    {
+      featureType: "poi.park",
+      elementType: "geometry",
+      stylers: [{ color: "#263c3f" }],
+    },
+    {
+      featureType: "poi.park",
+      elementType: "labels.text.fill",
+      stylers: [{ color: "#6b9a76" }],
+    },
+    {
+      featureType: "road",
+      elementType: "geometry",
+      stylers: [{ color: "#38414e" }],
+    },
+    {
+      featureType: "road",
+      elementType: "geometry.stroke",
+      stylers: [{ color: "#212a37" }],
+    },
+    {
+      featureType: "road",
+      elementType: "labels.text.fill",
+      stylers: [{ color: "#9ca5b3" }],
+    },
+    {
+      featureType: "road.highway",
+      elementType: "geometry",
+      stylers: [{ color: "#746855" }],
+    },
+    {
+      featureType: "road.highway",
+      elementType: "geometry.stroke",
+      stylers: [{ color: "#1f2835" }],
+    },
+    {
+      featureType: "road.highway",
+      elementType: "labels.text.fill",
+      stylers: [{ color: "#f3d19c" }],
+    },
+    {
+      featureType: "transit",
+      elementType: "geometry",
+      stylers: [{ color: "#2f3948" }],
+    },
+    {
+      featureType: "transit.station",
+      elementType: "labels.text.fill",
+      stylers: [{ color: "#d59563" }],
+    },
+    {
+      featureType: "water",
+      elementType: "geometry",
+      stylers: [{ color: "#17263c" }],
+    },
+    {
+      featureType: "water",
+      elementType: "labels.text.fill",
+      stylers: [{ color: "#515c6d" }],
+    },
+    {
+      featureType: "water",
+      elementType: "labels.text.stroke",
+      stylers: [{ color: "#17263c" }],
+    },
+  ];
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
@@ -291,8 +525,8 @@ export default function AddPostPage() {
                 styles.input,
                 { color: colors.text, backgroundColor: colors.inputBg },
               ]}
-              value={title}
-              onChangeText={setTitle}
+              value={form.title}
+              onChangeText={(text) => handleInputChange("title", text)}
             />
 
             <TextInput
@@ -308,8 +542,8 @@ export default function AddPostPage() {
               ]}
               multiline
               numberOfLines={4}
-              value={description}
-              onChangeText={setDescription}
+              value={form.description}
+              onChangeText={(text) => handleInputChange("description", text)}
             />
           </Animated.View>
 
@@ -329,10 +563,10 @@ export default function AddPostPage() {
               <Text
                 style={[
                   styles.selectButtonText,
-                  { color: category ? colors.text : colors.border },
+                  { color: form.category ? colors.text : colors.border },
                 ]}
               >
-                {category || "Select Category*"}
+                {form.category || "Select Category*"}
               </Text>
               <Ionicons name="chevron-down" size={20} color={colors.border} />
             </Pressable>
@@ -347,67 +581,79 @@ export default function AddPostPage() {
               <Text
                 style={[
                   styles.selectButtonText,
-                  { color: condition ? colors.text : colors.border },
+                  { color: form.condition ? colors.text : colors.border },
                 ]}
               >
-                {condition || "Select Condition*"}
+                {form.condition || "Select Condition*"}
               </Text>
               <Ionicons name="chevron-down" size={20} color={colors.border} />
             </Pressable>
           </Animated.View>
 
-          {/* Images */}
+          {/* Images/Videos */}
           <Animated.View
             entering={FadeInUp.delay(300).duration(500)}
             style={[styles.card, { backgroundColor: colors.card }]}
           >
             <View style={styles.sectionHeader}>
               <Text style={[styles.sectionTitle, { color: colors.text }]}>
-                Photos*
+                Media*
               </Text>
               <Text style={[styles.imageCount, { color: colors.border }]}>
-                {images.length}/5
+                {media.length}/5
               </Text>
             </View>
 
             <Text style={[styles.hint, { color: colors.border }]}>
-              Add clear photos of your item
+              Add clear photos or a short video of your item
             </Text>
 
             <View style={styles.imageContainer}>
-              {images.map((uri, index) => (
+              {media.map((item, index) => (
                 <View key={index} style={styles.imageWrapper}>
-                  <Image source={{ uri }} style={styles.imagePreview} />
+                  {item.type === "image" ? (
+                    <Image
+                      source={{ uri: item.uri }}
+                      style={styles.imagePreview}
+                    />
+                  ) : (
+                    <View
+                      style={[
+                        styles.videoPreview,
+                        { backgroundColor: colors.inputBg },
+                      ]}
+                    >
+                      <Ionicons name="videocam" size={40} color={colors.text} />
+                    </View>
+                  )}
                   <TouchableOpacity
-                    style={styles.removeImageButton}
-                    onPress={() => removeImage(index)}
+                    style={[
+                      styles.removeImageButton,
+                      { backgroundColor: colors.error },
+                    ]}
+                    onPress={() => removeMedia(index)}
                   >
                     <Ionicons name="close" size={16} color="#fff" />
                   </TouchableOpacity>
                 </View>
               ))}
 
-              {images.length < 5 && (
+              {media.length < 5 && (
                 <TouchableOpacity
                   style={[
                     styles.addImageButton,
-                    { backgroundColor: colors.inputBg },
+                    {
+                      backgroundColor: colors.inputBg,
+                      borderColor: colors.border,
+                    },
                   ]}
-                  onPress={pickImages}
-                  disabled={uploading}
+                  onPress={pickMedia}
+                  disabled={saving}
                 >
-                  {uploading ? (
-                    <ActivityIndicator color={colors.tint} />
-                  ) : (
-                    <>
-                      <Ionicons name="add" size={24} color={colors.tint} />
-                      <Text
-                        style={[styles.addImageText, { color: colors.tint }]}
-                      >
-                        Add Photo
-                      </Text>
-                    </>
-                  )}
+                  <Ionicons name="add" size={24} color={colors.tint} />
+                  <Text style={[styles.addImageText, { color: colors.tint }]}>
+                    Add Media
+                  </Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -422,6 +668,19 @@ export default function AddPostPage() {
               Exchange Details
             </Text>
 
+            {/* New Price Input Field */}
+            <TextInput
+              placeholder="Estimated Value/Price (optional)"
+              placeholderTextColor={colors.border}
+              style={[
+                styles.input,
+                { color: colors.text, backgroundColor: colors.inputBg },
+              ]}
+              keyboardType="numeric"
+              value={form.price}
+              onChangeText={(text) => handleInputChange("price", text)}
+            />
+
             <TextInput
               placeholder="What would you like in exchange? (comma separated)"
               placeholderTextColor={colors.border}
@@ -429,8 +688,8 @@ export default function AddPostPage() {
                 styles.input,
                 { color: colors.text, backgroundColor: colors.inputBg },
               ]}
-              value={exchangeFor}
-              onChangeText={setExchangeFor}
+              value={form.exchangeFor}
+              onChangeText={(text) => handleInputChange("exchangeFor", text)}
             />
 
             <View style={styles.anyOfferContainer}>
@@ -438,18 +697,59 @@ export default function AddPostPage() {
                 Open to any offer
               </Text>
               <TouchableOpacity
-                onPress={() => setOpenToAnyOffer(!openToAnyOffer)}
+                onPress={() =>
+                  handleInputChange("openToAnyOffer", !form.openToAnyOffer)
+                }
               >
                 <View
                   style={[
                     styles.toggle,
-                    openToAnyOffer && { backgroundColor: colors.accent },
+                    {
+                      backgroundColor: form.openToAnyOffer
+                        ? colors.accent
+                        : colors.border,
+                    },
                   ]}
                 >
                   <View
                     style={[
                       styles.toggleCircle,
-                      openToAnyOffer && { transform: [{ translateX: 20 }] },
+                      form.openToAnyOffer && {
+                        transform: [{ translateX: 20 }],
+                      },
+                      { backgroundColor: colors.card },
+                    ]}
+                  />
+                </View>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.anyOfferContainer}>
+              <Text style={[styles.anyOfferText, { color: colors.text }]}>
+                Open to cash offers
+              </Text>
+              <TouchableOpacity
+                onPress={() =>
+                  handleInputChange("openToCashOffer", !form.openToCashOffer)
+                }
+              >
+                <View
+                  style={[
+                    styles.toggle,
+                    {
+                      backgroundColor: form.openToCashOffer
+                        ? colors.accent
+                        : colors.border,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.toggleCircle,
+                      form.openToCashOffer && {
+                        transform: [{ translateX: 20 }],
+                      },
+                      { backgroundColor: colors.card },
                     ]}
                   />
                 </View>
@@ -467,8 +767,8 @@ export default function AddPostPage() {
                   marginTop: 12,
                 },
               ]}
-              value={tags}
-              onChangeText={setTags}
+              value={form.tags}
+              onChangeText={(text) => handleInputChange("tags", text)}
             />
           </Animated.View>
 
@@ -492,8 +792,8 @@ export default function AddPostPage() {
               style={styles.map}
               provider={PROVIDER_GOOGLE}
               initialRegion={{
-                latitude: location.lat,
-                longitude: location.lng,
+                latitude: form.location.lat,
+                longitude: form.location.lng,
                 latitudeDelta: 0.05,
                 longitudeDelta: 0.05,
               }}
@@ -501,13 +801,19 @@ export default function AddPostPage() {
               customMapStyle={isDark ? mapDarkStyle : []}
             >
               <Marker
-                coordinate={{ latitude: location.lat, longitude: location.lng }}
+                coordinate={{
+                  latitude: form.location.lat,
+                  longitude: form.location.lng,
+                }}
               >
                 <View style={styles.marker}>
                   <View
                     style={[
                       styles.markerDot,
-                      { backgroundColor: colors.accent },
+                      {
+                        backgroundColor: colors.accent,
+                        borderColor: colors.card,
+                      },
                     ]}
                   />
                 </View>
@@ -523,7 +829,22 @@ export default function AddPostPage() {
               disabled={saving}
             >
               {saving ? (
-                <ActivityIndicator color="#fff" />
+                <>
+                  <View style={styles.progressBarContainer}>
+                    <View
+                      style={[
+                        styles.progressBar,
+                        {
+                          width: `${uploadProgress}%`,
+                          backgroundColor: colors.accent,
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.submitText}>
+                    {uploadProgress}% Uploading...
+                  </Text>
+                </>
               ) : (
                 <>
                   <Ionicons name="send" size={20} color="#fff" />
@@ -534,95 +855,35 @@ export default function AddPostPage() {
           </Animated.View>
         </ScrollView>
 
-        {/* Category Modal */}
-        <Modal
-          visible={showCategoryModal}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowCategoryModal(false)}
-        >
-          <BlurView
-            intensity={30}
-            tint={isDark ? "dark" : "light"}
-            style={styles.modalContainer}
-          >
-            <Animated.View
-              entering={FadeInDown.duration(300)}
-              style={[styles.modalContent, { backgroundColor: colors.card }]}
-            >
-              <Text style={[styles.modalTitle, { color: colors.text }]}>
-                Select Category
-              </Text>
+        {/* Modals */}
+        <ModalPicker
+          isVisible={showCategoryModal}
+          title="Select Category"
+          items={CATEGORIES}
+          selectedItem={form.category}
+          onSelect={(item) => handleInputChange("category", item)}
+          onClose={() => setShowCategoryModal(false)}
+          isDark={isDark}
+        />
 
-              {CATEGORIES.map((item) => (
-                <Pressable
-                  key={item}
-                  style={styles.modalItem}
-                  onPress={() => {
-                    setCategory(item);
-                    setShowCategoryModal(false);
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.modalItemText,
-                      {
-                        color: category === item ? colors.tint : colors.text,
-                      },
-                    ]}
-                  >
-                    {item}
-                  </Text>
-                </Pressable>
-              ))}
-            </Animated.View>
-          </BlurView>
-        </Modal>
+        <ModalPicker
+          isVisible={showConditionModal}
+          title="Select Condition"
+          items={CONDITIONS}
+          selectedItem={form.condition}
+          onSelect={(item) => handleInputChange("condition", item)}
+          onClose={() => setShowConditionModal(false)}
+          isDark={isDark}
+        />
 
-        {/* Condition Modal */}
-        <Modal
-          visible={showConditionModal}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowConditionModal(false)}
-        >
-          <BlurView
-            intensity={30}
-            tint={isDark ? "dark" : "light"}
-            style={styles.modalContainer}
-          >
-            <Animated.View
-              entering={FadeInDown.duration(300)}
-              style={[styles.modalContent, { backgroundColor: colors.card }]}
-            >
-              <Text style={[styles.modalTitle, { color: colors.text }]}>
-                Select Condition
-              </Text>
-
-              {CONDITIONS.map((item) => (
-                <Pressable
-                  key={item}
-                  style={styles.modalItem}
-                  onPress={() => {
-                    setCondition(item);
-                    setShowConditionModal(false);
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.modalItemText,
-                      {
-                        color: condition === item ? colors.tint : colors.text,
-                      },
-                    ]}
-                  >
-                    {item}
-                  </Text>
-                </Pressable>
-              ))}
-            </Animated.View>
-          </BlurView>
-        </Modal>
+        {/* Custom Alert */}
+        <MessageBox
+          isVisible={messageBox.isVisible}
+          title={messageBox.title}
+          message={messageBox.message}
+          onClose={hideMessage}
+          isDark={isDark}
+        />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -705,6 +966,14 @@ const styles = StyleSheet.create({
     height: 80,
     borderRadius: 12,
   },
+  videoPreview: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.2)",
+  },
   removeImageButton: {
     position: "absolute",
     top: -8,
@@ -786,11 +1055,22 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 10,
     elevation: 5,
+    overflow: "hidden", // Required for the progress bar
+    position: "relative", // Required for the progress bar
   },
   submitText: {
     color: "#fff",
     fontSize: 16,
     fontWeight: "700",
+    zIndex: 1, // Ensure text is on top of progress bar
+  },
+  progressBarContainer: {
+    ...StyleSheet.absoluteFillObject, // Fill the entire button
+    backgroundColor: "rgba(0,0,0,0.2)",
+  },
+  progressBar: {
+    height: "100%",
+    borderRadius: 14,
   },
   modalContainer: {
     flex: 1,
@@ -814,166 +1094,19 @@ const styles = StyleSheet.create({
   modalItemText: {
     fontSize: 16,
   },
+  modalMessage: {
+    fontSize: 16,
+    marginBottom: 20,
+    textAlign: "center",
+  },
+  messageBoxButton: {
+    borderRadius: 12,
+    padding: 12,
+    alignSelf: "stretch",
+    alignItems: "center",
+  },
+  messageBoxButtonText: {
+    color: "#fff",
+    fontWeight: "700",
+  },
 });
-
-const mapDarkStyle = [
-  {
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#242f3e",
-      },
-    ],
-  },
-  {
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#746855",
-      },
-    ],
-  },
-  {
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#242f3e",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.locality",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#d59563",
-      },
-    ],
-  },
-  {
-    featureType: "poi",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#d59563",
-      },
-    ],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#263c3f",
-      },
-    ],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#6b9a76",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#38414e",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "geometry.stroke",
-    stylers: [
-      {
-        color: "#212a37",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#9ca5b3",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#746855",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "geometry.stroke",
-    stylers: [
-      {
-        color: "#1f2835",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#f3d19c",
-      },
-    ],
-  },
-  {
-    featureType: "transit",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#2f3948",
-      },
-    ],
-  },
-  {
-    featureType: "transit.station",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#d59563",
-      },
-    ],
-  },
-  {
-    featureType: "water",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#17263c",
-      },
-    ],
-  },
-  {
-    featureType: "water",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#515c6d",
-      },
-    ],
-  },
-  {
-    featureType: "water",
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#17263c",
-      },
-    ],
-  },
-];

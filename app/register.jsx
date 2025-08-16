@@ -200,6 +200,7 @@ export default function SignUp() {
         showMyLocationOnPost: false,
         allowUsersToContactMeDirectly: true,
         appAnnouncementAndUpdates: false,
+        verified: false,
       };
 
       // Create user document
